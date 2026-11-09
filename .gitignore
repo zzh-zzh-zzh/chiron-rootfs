@@ -1,0 +1,17 @@
+# 本仓库只放 chiron 的 rootfs 定制层与构建脚本；镜像本体（userdata.img / boot.img）不进 git。
+*.img
+*.img.zst
+*.tar
+*.tar.gz
+*.tar.xz
+*.tar.zst
+*.deb
+*.apk
+*.patch.gz
+
+# 构建缓存与产物
+build/
+cache/
+out/
+__pycache__/
+*.pyc
