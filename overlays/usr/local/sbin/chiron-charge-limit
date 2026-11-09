@@ -1,0 +1,86 @@
+#!/usr/bin/python3
+"""Persistent fixed 85% charge limit; never modifies USB power-path controls."""
+from pathlib import Path
+import fcntl
+import os
+import sys
+import time
+
+node = Path('/sys/class/power_supply/chiron-charger/charge_control_end_threshold')
+config = Path('/etc/chiron/charge-limit')
+VALID_ACTIONS = ('on', 'off', 'toggle', 'apply', 'status')
+
+
+def read_limit():
+    try:
+        return node.read_text().strip()
+    except OSError as error:
+        raise SystemExit(f'Charge limit unavailable: {node} ({error.strerror})')
+
+
+def wait_for_node(timeout=60):
+    deadline = time.monotonic() + timeout
+    while not node.exists():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SystemExit(
+                f'Charge limit unavailable after {timeout}s: {node}; '
+                'charging driver/sysfs node is not ready'
+            )
+        time.sleep(min(0.25, remaining))
+
+
+if len(sys.argv) != 2 or sys.argv[1] not in VALID_ACTIONS:
+    raise SystemExit('Usage: chiron-charge-limit on|off|toggle|apply|status')
+action = sys.argv[1]
+if action == 'status':
+    try:
+        enabled = read_limit() == '85'
+    except SystemExit:
+        print('85% status unavailable (charging driver not ready)')
+        raise SystemExit(1)
+    print('85% limit ON' if enabled else '85% limit OFF (100%)')
+    raise SystemExit(0)
+if os.geteuid() != 0:
+    raise SystemExit('Run with sudo')
+
+with open('/run/chiron-charge-limit.lock', 'w') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    if action == 'apply':
+        wait_for_node()
+    old = read_limit()
+    if action == 'apply':
+        value = config.read_text().strip() if config.exists() else '100'
+    elif action == 'toggle':
+        value = '100' if old == '85' else '85'
+    else:
+        value = '85' if action == 'on' else '100'
+    if value not in ('85', '100'):
+        raise SystemExit('Invalid saved charge limit')
+    try:
+        node.write_text(value + '\n')
+        if read_limit() != value:
+            raise SystemExit('Kernel readback mismatch')
+    except OSError as error:
+        raise SystemExit(f'Failed to set charge limit: {error}')
+    if action != 'apply':
+        temp = config.with_suffix('.new')
+        try:
+            with open(temp, 'w') as f:
+                os.fchmod(f.fileno(), 0o644)
+                f.write(value + '\n')
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp, config)
+            fd = os.open(config.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError:
+            try:
+                node.write_text(old + '\n')
+            finally:
+                temp.unlink(missing_ok=True)
+            raise
+    print('85% limit ON' if value == '85' else '85% limit OFF (100%)')

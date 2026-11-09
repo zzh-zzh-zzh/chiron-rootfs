@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""ACM maintenance serial in device role; leave OTG switching to the kernel."""
+from pathlib import Path
+import signal
+import subprocess
+import threading
+import socket
+import select
+import os
+import time
+
+CONFIG = Path('/sys/kernel/config')
+GADGET = CONFIG/'usb_gadget/chiron-serial'
+UDC_ROOT = Path('/sys/class/udc')
+stop = threading.Event()
+for sig in (signal.SIGTERM, signal.SIGINT):
+    signal.signal(sig, lambda *_: stop.set())
+
+
+def write(path, value):
+    path.write_text(str(value)+'\n')
+
+
+def unbind():
+    if (GADGET/'UDC').exists() and (GADGET/'UDC').read_text().strip():
+        write(GADGET/'UDC', '')
+
+
+def udcs():
+    try:
+        return sorted(UDC_ROOT.iterdir())
+    except OSError:
+        return []
+
+
+def udc_free(udc):
+    try:
+        return not (udc/'function').read_text().strip()
+    except OSError:
+        return False
+
+
+def unbind_stale_gadgets():
+    root = CONFIG/'usb_gadget'
+    try:
+        gadgets = list(root.iterdir())
+    except OSError:
+        return
+    for gadget in gadgets:
+        if not gadget.is_dir():
+            continue
+        try:
+            udc = gadget/'UDC'
+            if udc.exists() and udc.read_text().strip():
+                write(udc, '')
+        except OSError:
+            pass
+
+
+def wait_free_udcs(timeout):
+    deadline = time.monotonic() + timeout
+    while True:
+        free = [udc for udc in udcs() if udc_free(udc)]
+        if free or time.monotonic() >= deadline:
+            return free
+        time.sleep(0.05)
+
+
+def device_role():
+    # BC1.2 data ports may enumerate ACM; dedicated chargers need D+/D-
+    # undriven for QC. Wait for detection when a charger driver is present.
+    charger = Path('/sys/class/power_supply/chiron-charger')
+    if charger.exists():
+        try:
+            kind = (charger/'usb_type').read_text()
+        except OSError:
+            return False
+        if '[SDP]' not in kind and '[CDP]' not in kind:
+            return False
+    for node in sorted(Path('/sys/class/extcon').glob('*/state')):
+        states = dict(line.split('=', 1) for line in node.read_text().splitlines() if '=' in line)
+        if 'USB' in states and 'USB-HOST' in states:
+            return states['USB'] == '1' and states['USB-HOST'] == '0'
+    return False
+
+
+CONFIG.mkdir(parents=True, exist_ok=True)
+if not any(line.split()[1:3] == [str(CONFIG), 'configfs'] for line in Path('/proc/mounts').read_text().splitlines()):
+    subprocess.run(['mount', '-t', 'configfs', 'configfs', str(CONFIG)], check=True, timeout=5)
+GADGET.mkdir(exist_ok=True)
+# The initramfs may leave a gadget bound while the rootfs service starts.
+# Release it and wait for the UDC driver to clear its function before binding.
+unbind_stale_gadgets()
+wait_free_udcs(2.0)
+for key, value in {'idVendor': '0x1d6b', 'idProduct': '0x0104', 'bcdDevice': '0x0200',
+                   'bcdUSB': '0x0200', 'bDeviceClass': '0x02',
+                   'bDeviceSubClass': '0x00', 'bDeviceProtocol': '0x00'}.items():
+    write(GADGET/key, value)
+strings = GADGET/'strings/0x409'
+strings.mkdir(parents=True, exist_ok=True)
+serial = Path('/sys/devices/soc0/serial_number')
+serial_number = serial.read_text().strip() if serial.exists() else Path('/etc/machine-id').read_text().strip()
+write(strings/'serialnumber', serial_number)
+write(strings/'manufacturer', 'Ubuntu')
+write(strings/'product', 'MIX 2 Ubuntu maintenance serial')
+config = GADGET/'configs/c.1'
+(config/'strings/0x409').mkdir(parents=True, exist_ok=True)
+write(config/'strings/0x409/configuration', 'CDC ACM serial')
+write(config/'bmAttributes', '0xc0')
+write(config/'MaxPower', 100)
+function = GADGET/'functions/acm.usb0'
+function.mkdir(parents=True, exist_ok=True)
+link = config/'acm.usb0'
+if not link.is_symlink():
+    link.symlink_to(function)
+last = None
+events=socket.socket(socket.AF_NETLINK,socket.SOCK_DGRAM,15)
+events.bind((os.getpid(),1))  # Kernel uevents: extcon and power_supply changes.
+events.setblocking(False)
+wake_read,wake_write=socket.socketpair()
+wake_read.setblocking(False)
+wake_write.setblocking(False)
+old_wakeup=signal.set_wakeup_fd(wake_write.fileno())
+try:
+    while not stop.is_set():
+        # A role switch can remove the UDC between any two sysfs reads.
+        # Initialize values so a transient OSError never masks itself with
+        # UnboundLocalError while deciding whether to retry.
+        device = False
+        bound = ''
+        free_udcs = []
+        try:
+            device = device_role()
+            udc_list = udcs()
+            current = (GADGET/'UDC').read_text().strip()
+            free_udcs = [udc for udc in udc_list if udc_free(udc)]
+            if not device:
+                unbind()
+                state = (device, '')
+            elif not current and not free_udcs:
+                # Never write a busy UDC: it emits a kernel error before the
+                # configfs operation returns EBUSY.
+                unbind_stale_gadgets()
+                free_udcs = wait_free_udcs(0.2)
+                if not free_udcs:
+                    state = ('waiting-udc', '')
+                else:
+                    write(GADGET/'UDC', free_udcs[0].name)
+                    state = (device, free_udcs[0].name)
+            elif not current:
+                write(GADGET/'UDC', free_udcs[0].name)
+                state = (device, free_udcs[0].name)
+            else:
+                state = (device, current)
+            if state != last:
+                if state[0] == 'waiting-udc':
+                    print('USB serial waiting for a free UDC', flush=True)
+                else:
+                    print(f'USB serial device_role={device} UDC={bound or state[1] or "unbound"}', flush=True)
+                last = state
+        except OSError as error:
+            # DWC3 destroys/recreates its UDC during role transitions. Retry
+            # after that transition rather than forcing a controller role.
+            state = ('transition', error.errno)
+            if state != last:
+                print(f'USB serial transition errno={error.errno}', flush=True)
+                last = state
+        retry = state[0] in ('transition', 'waiting-udc') or (device and not state[1])
+        ready,_,_=select.select([events,wake_read],[],[],1 if retry else 60)
+        if wake_read in ready:wake_read.recv(4096)
+        if events in ready:
+            while True:
+                try:events.recv(65536)
+                except BlockingIOError:break
+finally:
+    signal.set_wakeup_fd(old_wakeup)
+    events.close()
+    wake_read.close()
+    wake_write.close()
+    unbind()

@@ -1,0 +1,42 @@
+#!/bin/sh
+# 记住/恢复背光亮度。
+#
+# save    : 由 chiron-brightness-save.path 在 /run/chiron-screen/state 变化时调用。
+#           只记 >0 的值 —— 熄屏时 state 会被写成 0，而 0 不是我们想恢复的亮度。
+# restore : 开机时在 chiron-power-button 启动之前写回 sysfs，这样服务读到的
+#           "当前亮度"就是恢复后的值，`saved` 基准不会错。
+#
+# 面板/背光的唯一所有者仍是 chiron-power-button；这里只碰 boot 时刻的一个值。
+BL=/sys/class/backlight/backlight
+STATE=/run/chiron-screen/state
+SAVE=/var/lib/chiron-screen/brightness
+
+log() { logger -t chiron-brightness "$*" 2>/dev/null || true; }
+
+case "${1:-}" in
+save)
+	[ -r "$STATE" ] || exit 0
+	value=$(cat "$STATE" 2>/dev/null) || exit 0
+	[ -n "$value" ] || exit 0
+	[ "$value" -gt 0 ] 2>/dev/null || exit 0
+	mkdir -p "$(dirname "$SAVE")" || exit 0
+	printf '%s\n' "$value" > "$SAVE.tmp" && mv "$SAVE.tmp" "$SAVE" && log "saved $value"
+	;;
+restore)
+	[ -r "$SAVE" ] || exit 0
+	[ -r "$BL/brightness" ] || { log "no backlight yet, skip"; exit 0; }
+	value=$(cat "$SAVE" 2>/dev/null) || exit 0
+	[ "$value" -gt 0 ] 2>/dev/null || exit 0
+	max=$(cat "$BL/max_brightness" 2>/dev/null) || max=4095
+	[ "$value" -le "$max" ] || value=$max
+	if printf '%s\n' "$value" > "$BL/brightness" 2>/dev/null; then
+		log "restored $value"
+	else
+		log "write failed (panel not ready?)"
+	fi
+	;;
+*)
+	echo "usage: $0 save|restore" >&2
+	exit 2
+	;;
+esac

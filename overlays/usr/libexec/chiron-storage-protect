@@ -1,0 +1,30 @@
+#!/bin/sh
+# Permit only the verified rootfs container; protect other partition nodes.
+set -eu
+state=/run/chiron-storage
+mkdir -p "$state"
+userdata=$(readlink -f /dev/disk/by-partlabel/userdata)
+test -b "$userdata"
+name=${userdata##*/}
+grep -qx PARTNAME=userdata "/sys/class/block/$name/uevent"
+test "$(blockdev --getss "$userdata")" = 4096
+rootdev=$(findmnt -n -o SOURCE /)
+case "$rootdev" in
+    /dev/loop*p[0-9]*)
+        loop=${rootdev%p*}
+        backing=$(losetup -n -O BACK-FILE "$loop")
+        test "$(readlink -f "$backing")" = "$userdata"
+        ;;
+    "$userdata") ;;
+    *) echo "Unexpected root device: $rootdev" >&2; exit 1;;
+esac
+test "$(findmnt -n -o FSTYPE /)" = ext4
+for entry in /sys/class/block/sd*/partition; do
+    test -f "$entry" || continue
+    part=${entry%/partition}; part=${part##*/}
+    test "$part" != "$name" || continue
+    blockdev --setro "/dev/$part"
+    test "$(cat /sys/class/block/$part/ro)" = 1
+done
+printf '%s\n' "$userdata" > "$state/rootfs-container"
+echo protected > "$state/status"

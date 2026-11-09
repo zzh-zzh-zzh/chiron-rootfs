@@ -1,0 +1,118 @@
+#!/usr/bin/python3
+"""Steady-state Wi-Fi safety checks without spawning a process per file read."""
+import os
+from pathlib import Path
+import signal
+import select
+import stat
+import sys
+import time
+
+PARTITIONS = ('modemst1', 'modemst2', 'fsc', 'fsg', 'persist')
+SERVICES = ('rmtfs', 'tqftpserv', 'diag-router')
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
+def read(path):
+    return Path(path).read_text().strip()
+
+
+def same_contents(left, right):
+    with open(left, 'rb') as a, open(right, 'rb') as b:
+        while True:
+            x, y = a.read(65536), b.read(65536)
+            if x != y:
+                return False
+            if not x:
+                return True
+
+
+def process_check(directory, name):
+    value = read(directory / (name + '.pid'))
+    require(value.isascii() and value.isdecimal() and int(value) > 1,
+            'invalid PID for ' + name)
+    pid = int(value)
+    os.kill(pid, 0)
+    proc = Path('/proc') / value
+    status = dict(line.split(':', 1) for line in
+                  (proc / 'status').read_text().splitlines() if ':' in line)
+    require(status['State'].strip().split()[0] not in ('Z', 'X'),
+            'dead process: ' + name)
+    expected = '/usr/bin/' + name
+    executable = os.readlink(proc / 'exe')
+    require(executable == expected or
+            (executable == expected + ' (deleted)' and
+             same_contents(proc / 'exe', expected)), 'wrong executable: ' + name)
+    # Pin the process start time as well as PID to detect replacement/reuse.
+    fields = (proc / 'stat').read_text().rsplit(')', 1)[1].split()
+    return pid, fields[19]
+
+
+def storage_check():
+    require(read('/run/chiron-storage/status') == 'protected', 'storage protection lost')
+    roots = []
+    for line in Path('/proc/self/mountinfo').read_text().splitlines():
+        left, right = line.split(' - ', 1)
+        if left.split()[4] == '/':
+            roots.append(right.split()[0])
+    require(roots == ['ext4'], 'root is not ext4')
+    for name in PARTITIONS:
+        dev = (Path('/dev/disk/by-partlabel') / name).resolve(strict=True)
+        require(stat.S_ISBLK(dev.stat().st_mode), 'not a block device: ' + name)
+        node = Path('/sys/class/block') / dev.name
+        require('PARTNAME=' + name in (node / 'uevent').read_text().splitlines(),
+                'partition identity mismatch: ' + name)
+        require(read(node / 'ro') == '1', 'partition writable: ' + name)
+
+
+class Monitor:
+    def __init__(self, directory, remoteproc):
+        self.directory = Path(directory)
+        self.remoteproc = Path(remoteproc)
+        self.boot = read(self.directory / 'boot-id')
+        self.identities = {}
+
+    def check(self):
+        require(read(self.remoteproc / 'state') == 'running', 'MSS no longer running')
+        require(read('/proc/sys/kernel/random/boot_id') == self.boot, 'boot ID changed')
+        for name in SERVICES:
+            identity = process_check(self.directory, name)
+            require(identity == self.identities.setdefault(name, identity),
+                    'process identity changed: ' + name)
+        storage_check()
+
+
+def main():
+    if len(sys.argv) != 3:
+        raise SystemExit('usage: chiron-wifi-monitor STATE_DIRECTORY REMOTEPROC')
+    # Parent shell retains ownership of ordered MSS/helper shutdown. A signal
+    # only ends this checker; it must never independently tear down firmware.
+    def stop(signum, frame):
+        raise SystemExit(0)
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, stop)
+    monitor = Monitor(sys.argv[1], sys.argv[2])
+    pidfds = []
+    try:
+        monitor.check()
+        for pid, start in monitor.identities.values():
+            pidfds.append(os.pidfd_open(pid))
+        monitor.check()  # Reject PID reuse between the check and pidfd_open.
+        while True:
+            ready, _, _ = select.select(pidfds, [], [], 60)
+            require(not ready, 'Wi-Fi helper exited')
+            monitor.check()
+    except (OSError, RuntimeError, ValueError, KeyError, IndexError) as error:
+        print('Wi-Fi safety check failed: ' + str(error), file=sys.stderr, flush=True)
+        raise SystemExit(1)
+    finally:
+        for fd in pidfds:
+            os.close(fd)
+
+
+if __name__ == '__main__':
+    main()

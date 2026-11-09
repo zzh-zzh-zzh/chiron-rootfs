@@ -1,0 +1,174 @@
+#!/usr/bin/python3
+"""Control display output and backlight without suspending the system."""
+import fcntl
+import grp
+import json
+import os
+from pathlib import Path
+import select
+import signal
+import socket
+import struct
+import subprocess
+import time
+
+EVENT = struct.Struct('@llHHi')
+KEY_POWER = 116
+LONG_PRESS = 3.0
+
+def set_output_power(enabled):
+    """Send only a fixed command over Sway IPC, including the login compositor."""
+    paths=list(Path('/run/user').glob('*/sway-ipc.*.sock'))
+    if not paths:return  # Text console: only the backlight can be controlled.
+    command=b'output * power '+(b'on' if enabled else b'off')
+    failures=[]
+    success=False
+    for path in paths:
+        try:
+            with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as ipc:
+                ipc.settimeout(3)
+                ipc.connect(str(path))
+                ipc.sendall(b'i3-ipc'+struct.pack('<II',len(command),0)+command)
+                def read_exact(size):
+                    data=b''
+                    while len(data)<size:
+                        chunk=ipc.recv(size-len(data))
+                        if not chunk:raise OSError('Sway IPC closed')
+                        data+=chunk
+                    return data
+                header=read_exact(14)
+                length,kind=struct.unpack('<II',header[6:])
+                if header[:6]!=b'i3-ipc' or kind!=0 or length>65536:
+                    raise ValueError('Invalid Sway IPC response')
+                reply=json.loads(read_exact(length))
+                if not reply or not all(x.get('success') for x in reply):
+                    raise ValueError('Sway rejected display power command')
+                success=True
+        except (OSError,ValueError) as error:failures.append(str(error))
+    if not success:
+        print('Display output power failed: '+ '; '.join(failures),flush=True)
+
+class Backlight:
+    def __init__(self, path, output_power=None):
+        self.path = Path(path)
+        self.maximum = int((self.path/'max_brightness').read_text())
+        self.saved = int((self.path/'brightness').read_text()) or max(1,self.maximum//2)
+        self.output_power = output_power or (lambda enabled: None)
+
+    def toggle(self):
+        value = int((self.path/'brightness').read_text())
+        if value > 0:
+            self.blank()
+        else:
+            self.wake()
+
+    def blank(self):
+        value = int((self.path/'brightness').read_text())
+        if value > 0:
+            self.saved = value
+            self.write(0)
+        self.output_power(False)
+
+    def write(self, value):
+        (self.path/'brightness').write_text(str(max(0,min(self.maximum,value)))+'\n')
+        state=Path('/run/chiron-screen/state')
+        if state.parent.exists():
+            state.write_text(str(value)+'\n')
+
+    def wake(self):
+        self.output_power(True)
+        self.write(self.saved)
+
+    def adjust(self, direction):
+        current = int((self.path/'brightness').read_text())
+        step = max(1, round(self.maximum * 0.10))
+        value = max(max(1, round(self.maximum * 0.05)),
+                    min(self.maximum, (current or self.saved) + direction * step))
+        self.saved = value
+        if current > 0:
+            self.write(value)
+
+class Button:
+    def __init__(self, screen, shutdown):
+        self.screen, self.shutdown = screen, shutdown
+        self.pressed = None
+        self.fired = False
+
+    def event(self, value, now):
+        if value == 1 and self.pressed is None:
+            self.pressed, self.fired = now, False
+        elif value == 0 and self.pressed is not None:
+            self.tick(now)
+            if not self.fired:
+                self.screen.toggle()
+            self.pressed = None
+        # EV_KEY autorepeat does not reset the hold timer.
+
+    def tick(self, now):
+        if self.pressed is not None and not self.fired and now-self.pressed >= LONG_PRESS:
+            self.fired = True
+            self.screen.wake()
+            self.shutdown()
+
+def main():
+    paths=[p for p in Path('/sys/class/backlight').iterdir()
+           if (p/'device/driver').resolve().name == 'qcom,wled']
+    if len(paths)!=1:
+        raise RuntimeError('Expected one WLED backlight')
+    screen=Backlight(paths[0],set_output_power)
+    events=[p for p in Path('/sys/class/input').glob('event*') if (p/'device/name').read_text().strip()=='pm8941_pwrkey']
+    if len(events)!=1:
+        raise RuntimeError('Expected one PMIC power button')
+    fd=os.open('/dev/input/'+events[0].name,os.O_RDONLY|os.O_NONBLOCK)
+    fcntl.ioctl(fd,0x400445a0,struct.pack('i',time.CLOCK_MONOTONIC))  # EVIOCSCLOCKID
+    fcntl.ioctl(fd,0x40044590,1)  # EVIOCGRAB, prevent duplicate handling
+    stopping=False
+    def stop(*_):
+        nonlocal stopping
+        stopping=True
+    for sig in (signal.SIGTERM,signal.SIGINT):signal.signal(sig,stop)
+    def shutdown():
+        subprocess.run(['systemctl','--no-block','poweroff'],check=True,timeout=5)
+    button=Button(screen,shutdown)
+    control=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM)
+    wake_read,wake_write=socket.socketpair()
+    wake_read.setblocking(False)
+    wake_write.setblocking(False)
+    old_wakeup=signal.set_wakeup_fd(wake_write.fileno())
+    control_path=Path('/run/chiron-screen/control')
+    control_path.unlink(missing_ok=True)
+    control.bind(str(control_path))
+    os.chown(control_path,0,grp.getgrnam('video').gr_gid)
+    os.chmod(control_path,0o660)
+    try:
+        while not stopping:
+            timeout=None if button.pressed is None or button.fired else max(0,button.pressed+LONG_PRESS-time.monotonic())
+            ready,_,_=select.select([fd,control,wake_read],[],[],timeout)
+            if wake_read in ready:
+                wake_read.recv(4096)
+            if stopping:break
+            if control in ready:
+                command, address=control.recvfrom(16)
+                if command==b'blank':screen.blank()
+                elif command==b'wake':screen.wake()
+                elif command==b'dimmer':screen.adjust(-1)
+                elif command==b'brighter':screen.adjust(1)
+                if address:
+                    try:control.sendto(b'ok',address)
+                    except OSError:pass  # The requesting client may have exited.
+            if fd in ready:
+                data=os.read(fd,EVENT.size*32)
+                if not data or len(data)%EVENT.size:raise RuntimeError('Power key event stream lost')
+                for sec,usec,kind,code,value in EVENT.iter_unpack(data):
+                    if kind==1 and code==KEY_POWER:button.event(value,sec+usec/1e6)
+            button.tick(time.monotonic())
+    finally:
+        signal.set_wakeup_fd(old_wakeup)
+        wake_read.close()
+        wake_write.close()
+        screen.wake()
+        control.close()
+        control_path.unlink(missing_ok=True)
+        os.close(fd)
+
+if __name__=='__main__':main()

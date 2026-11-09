@@ -1,0 +1,6 @@
+#!/bin/sh
+export WLR_RENDERER=pixman
+export GDK_BACKEND=wayland
+export GDK_GL=disable
+export GTK_IM_MODULE=wayland
+exec dbus-run-session -- sway --config /etc/chiron/greeter.conf

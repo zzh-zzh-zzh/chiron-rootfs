@@ -1,0 +1,184 @@
+#!/bin/sh
+# Rootfs firmware, RAM EFS, tested DIAG order; NM owns association/DHCP.
+set -eu
+umask 077
+out=/run/chiron-wifi
+test ! -e "$out" # No same-boot MSS restart after a fault.
+mkdir -m 700 "$out"
+echo $$ > "$out/supervisor.pid"
+echo preparing > "$out/status"
+cat /proc/sys/kernel/random/boot_id > "$out/boot-id"
+rp=
+for proc in /sys/class/remoteproc/remoteproc*; do
+    case "$(cat "$proc/name")" in *4080000*|*mss*|*modem*) rp=$proc; break;; esac
+done
+test -n "$rp"
+diag_started=0
+seen_running=0
+stopping=0
+monitor_pid=
+
+storage_check() {
+    test "$(cat /run/chiron-storage/status)" = protected
+    test "$(findmnt -n -o FSTYPE /)" = ext4
+    for name in modemst1 modemst2 fsc fsg persist; do
+        dev=$(readlink -f "/dev/disk/by-partlabel/$name")
+        test -b "$dev"
+        node=${dev##*/}
+        grep -qx "PARTNAME=$name" "/sys/class/block/$node/uevent"
+        test "$(cat /sys/class/block/$node/ro)" = 1
+    done
+}
+process_check() {
+    pid=$(cat "$out/$1.pid")
+    case "$pid" in ''|*[!0-9]*) return 1;; esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    ! grep -Eq '^State:[[:space:]]+Z' "/proc/$pid/status" || return 1
+    exe=$(readlink -f "/proc/$pid/exe")
+    case "$exe" in
+        "$2") ;;
+        "$2 (deleted)") cmp "/proc/$pid/exe" "$2";;
+        *) return 1;;
+    esac
+}
+stop_pid() {
+    [ -f "$out/$1.pid" ] || return 0
+    pid=$(cat "$out/$1.pid")
+    case "$pid" in ''|*[!0-9]*) return 0;; esac
+    [ "$(cat /proc/$pid/comm 2>/dev/null || true)" = "$2" ] || return 0
+    kill "$pid" 2>/dev/null || true
+}
+cleanup() {
+    code=$?
+    trap - EXIT HUP INT TERM
+    set +e
+    if [ -n "$monitor_pid" ]; then
+        kill -TERM "$monitor_pid" 2>/dev/null
+        wait "$monitor_pid" 2>/dev/null
+    fi
+    if [ "$stopping" != 1 ]; then
+        cat "$rp/state" > "$out/first-fault-state"
+        echo failed-reboot-required > "$out/status"
+        code=1
+    else
+        echo stopping > "$out/status"
+    fi
+    timeout 10 nmcli device set wlan0 managed no
+    if [ "$(cat "$rp/state")" = running ]; then
+        echo stop > "$rp/state"
+        for i in $(seq 1 10); do
+            [ "$(cat "$rp/state")" != running ] && break
+            sleep 1
+        done
+    fi
+    stop_pid diag-router diag-router
+    stop_pid tqftpserv tqftpserv
+    stop_pid rmtfs rmtfs
+    [ ! -f "$out/partition-before.sha256" ] || sha256sum -c "$out/partition-before.sha256" > "$out/partition-after-check.log" || code=1
+    storage_check || code=1
+    if [ "$stopping" = 1 ]; then
+        if [ "$code" = 0 ]; then echo stopped-reboot-required > "$out/status"; else echo failed-reboot-required > "$out/status"; fi
+    fi
+    exit "$code"
+}
+trap cleanup EXIT
+trap 'stopping=1; exit 0' HUP INT TERM
+
+storage_check
+test "$(cat "$rp/state")" = offline
+for service in rmtfs tqftpserv diag-router; do ! pgrep -x "$service"; done
+(cd /usr/lib/firmware && sha256sum -c /usr/share/chiron/firmware.sha256) > "$out/firmware-check.log"
+mkdir -m 700 "$out/efs"
+for name in modemst1 modemst2 fsc fsg persist; do
+    dev=$(readlink -f "/dev/disk/by-partlabel/$name")
+    sha256sum "$dev" >> "$out/partition-before.sha256"
+    case "$name" in
+        modemst1) target=modem_fs1;; modemst2) target=modem_fs2;;
+        fsc) target=modem_fsc;; fsg) target=modem_fsg;; persist) continue;;
+    esac
+    dd if="$dev" of="$out/efs/$target" bs=1048576
+    test "$(sha256sum "$dev" | cut -d ' ' -f1)" = "$(sha256sum "$out/efs/$target" | cut -d ' ' -f1)"
+done
+mkdir -p /var/lib/tqftpserv
+echo disabled > "$rp/recovery"
+test "$(cat "$rp/recovery")" = disabled
+if [ -f /sys/module/ath10k_core/parameters/chiron_stop_on_fault ]; then
+    echo 1 > /sys/module/ath10k_core/parameters/chiron_stop_on_fault
+fi
+rmtfs -r -o "$out/efs" &
+echo $! > "$out/rmtfs.pid"
+sleep 2
+process_check rmtfs /usr/bin/rmtfs
+tqftpserv &
+echo $! > "$out/tqftpserv.pid"
+sleep 2
+process_check tqftpserv /usr/bin/tqftpserv
+
+healthy() {
+    state=$(cat "$rp/state")
+    [ "$state" != running ] || seen_running=1
+    [ "$seen_running" != 1 ] || test "$state" = running
+    test "$state" != crashed
+    cmp "$out/boot-id" /proc/sys/kernel/random/boot_id
+    process_check rmtfs /usr/bin/rmtfs
+    process_check tqftpserv /usr/bin/tqftpserv
+    [ "$diag_started" != 1 ] || process_check diag-router /usr/bin/diag-router
+
+}
+echo starting-mss > "$out/status"
+echo start > "$rp/state"
+diag_services_ready() {
+    timeout 5 qrtr-lookup > "$out/diag-services.log" || return 1
+    awk '$1==4097 && $4==1 {if ($3==0) c=1; if ($3==2) d=1; if ($3==4) i=1} END {exit !(c&&d&&i)}' "$out/diag-services.log"
+}
+stable_ready=0
+for i in $(seq 1 60); do
+    if [ "$(cat "$rp/state")" = running ] && [ -d /sys/class/net/wlan0 ] && [ "$diag_started" = 0 ]; then
+        diag-router &
+        echo $! > "$out/diag-router.pid"
+        diag_started=1
+        echo early-after-wlan-full-qcom-diag > "$out/diag-policy"
+    fi
+    healthy
+    if [ "$diag_started" = 1 ] && diag_services_ready; then
+        stable_ready=$((stable_ready + 1))
+        [ "$stable_ready" -ge 3 ] && break
+    else
+        stable_ready=0
+    fi
+    sleep 1
+done
+test "$(cat "$rp/state")" = running
+test -d /sys/class/net/wlan0
+test "$diag_started" = 1
+for i in $(seq 1 10); do
+    healthy
+    timeout 5 qrtr-lookup > "$out/diag-services.log"
+    if awk '$1==4097 && $4==1 {if ($3==0) c=1; if ($3==2) d=1; if ($3==4) i=1} END {exit !(c&&d&&i)}' "$out/diag-services.log"; then break; fi
+    sleep 1
+done
+awk '$1==4097 && $4==1 {if ($3==0) c=1; if ($3==2) d=1; if ($3==4) i=1} END {exit !(c&&d&&i)}' "$out/diag-services.log"
+mac=$(/usr/libexec/chiron-wlan-address)
+echo "$mac" | grep -Eq '^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$'
+ip link set wlan0 down
+ip link set wlan0 address "$mac"
+iw reg reload
+iw reg set CN
+for i in $(seq 1 10); do
+    healthy
+    iw reg get > "$out/regulatory.log"
+    grep -q '^country CN:' "$out/regulatory.log" && break
+    sleep 1
+done
+grep -q '^country CN:' "$out/regulatory.log"
+storage_check
+sha256sum -c "$out/partition-before.sha256" > "$out/partition-ready-check.log"
+nmcli device set wlan0 managed yes
+echo ready-for-network > "$out/status"
+echo 'CHIRON: rootfs WiFi ready; NetworkManager owns wlan0' > /dev/kmsg
+/usr/libexec/chiron-wifi-monitor "$out" "$rp" &
+monitor_pid=$!
+# wait is interrupted by TERM, so cleanup still runs promptly on shutdown.
+wait "$monitor_pid"
+# The checker is expected to run until our signal handler stops it.
+exit 1

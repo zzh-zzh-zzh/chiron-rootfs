@@ -1,0 +1,8 @@
+#!/bin/sh
+export WLR_RENDERER=pixman
+export GDK_BACKEND=wayland
+export GDK_GL=disable
+export XDG_CURRENT_DESKTOP=sway
+export XDG_SESSION_TYPE=wayland
+export GTK_IM_MODULE=wayland
+exec dbus-run-session -- sway --config /etc/chiron/sway.conf

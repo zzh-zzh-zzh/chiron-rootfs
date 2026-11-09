@@ -1,0 +1,12 @@
+[Unit]
+Description=Restore chiron backlight brightness at boot
+Documentation=file:///usr/libexec/chiron-brightness-persist
+After=systemd-udev-trigger.service
+Before=chiron-power-button.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/chiron-brightness-persist restore
+
+[Install]
+WantedBy=multi-user.target

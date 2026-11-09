@@ -1,0 +1,8 @@
+[Unit]
+Description=Persist chiron backlight brightness
+Documentation=file:///usr/libexec/chiron-brightness-persist
+After=chiron-power-button.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/chiron-brightness-persist save

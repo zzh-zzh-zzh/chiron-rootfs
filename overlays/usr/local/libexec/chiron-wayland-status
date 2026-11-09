@@ -1,0 +1,242 @@
+#!/usr/bin/python3
+"""Small Sway status bar; only fixed actions, no command from click input."""
+import json
+import ctypes
+import os
+import re
+from pathlib import Path
+import select
+import subprocess
+import sys
+import time
+
+actions = {
+    'terminal': 'foot',
+    'charge-limit': None,
+    'keyboard': None,
+    'dimmer': 'chiron-screen dimmer',
+    'brighter': 'chiron-screen brighter',
+    'close': None,
+    'rotate': None,
+    'logout': None,
+}
+logout_until=0
+wifi_cached=('WiFi —',0.0)
+
+def wifi_status():
+    global wifi_cached
+    if time.monotonic() - wifi_cached[1] < 15:
+        return wifi_cached[0]
+    text = 'WiFi ' + chr(0x2014)
+    try:
+        if Path('/sys/class/net/wlan0/operstate').read_text().strip() != 'up':
+            text = 'WiFi offline'
+        else:
+            # Read the active association only; do not ask NetworkManager to
+            # enumerate access points or wait for a scan.
+            link = subprocess.check_output(
+                ['iw', 'dev', 'wlan0', 'link'], text=True, timeout=2
+            )
+            if 'Not connected.' in link:
+                text = 'WiFi offline'
+            else:
+                match = re.search(r'^\s*signal:\s*(-?\d+(?:\.\d+)?)\s*dBm\s*$',
+                                  link, re.MULTILINE)
+                if match:
+                    dbm = float(match.group(1))
+                    percent = max(0, min(100, round(2 * (dbm + 100))))
+                    text = f'WiFi {percent}%'
+                else:
+                    text = 'WiFi online'
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    wifi_cached = (text, time.monotonic())
+    return text
+if '--greeter' in sys.argv:
+    actions={k:v for k,v in actions.items() if k in ('keyboard','dimmer','brighter','rotate','charge-limit')}
+
+last_cpu=None
+slow_metrics=(None,0.0)
+info_tail=(None,0.0)
+def metric_blocks():
+    global last_cpu, slow_metrics
+    result=[]
+    def add(text):result.append(dict(full_text=text))
+    try:
+        ticks=[int(x) for x in Path('/proc/stat').read_text().splitlines()[0].split()[1:9]]
+        current=(sum(ticks),ticks[3]+ticks[4])
+        if last_cpu and current[0]>last_cpu[0]:
+            busy=100*(1-(current[1]-last_cpu[1])/(current[0]-last_cpu[0]))
+            add(f'CPU {max(0,min(100,busy)):.0f}%')
+        else:add('CPU …')
+        last_cpu=current
+    except (OSError,ValueError,IndexError):add('CPU —')
+    temps=[]
+    for p in Path('/sys/class/thermal').glob('thermal_zone*'):
+        try:
+            if re.fullmatch(r'cpu\d+-thermal',(p/'type').read_text().strip()):temps.append(int((p/'temp').read_text())/1000)
+        except (OSError,ValueError):pass
+    add(f'{max(temps):.0f}°C' if temps else 'T —')
+    now=time.monotonic()
+    if slow_metrics[0] is not None and now-slow_metrics[1]<10:
+        return result+slow_metrics[0]
+    try:
+        mem={line.split(':')[0]:int(line.split()[1]) for line in Path('/proc/meminfo').read_text().splitlines()}
+        add(f"RAM {(mem['MemTotal']-mem['MemAvailable'])/1048576:.1f}/{mem['MemTotal']/1048576:.1f}G")
+    except (OSError,ValueError,KeyError):add('RAM —')
+    slow_metrics=(result[2:],now)
+    return result
+
+def toggle_rotation():
+    outputs=json.loads(subprocess.check_output(['swaymsg','-r','-t','get_outputs'],text=True,timeout=3))
+    panel=next((o for o in outputs if o.get('active') and re.fullmatch(r'DSI-\d+',o.get('name',''))),None)
+    if panel is None:return
+    name=panel['name']
+    transform='90' if panel.get('transform','normal') in ('normal','180') else 'normal'
+    # Mapping to the physical output lets Sway apply its transform to touch.
+    command=f'input type:touch map_to_output {name}; output {name} transform {transform}'
+    result=json.loads(subprocess.check_output(['swaymsg','-r',command],text=True,timeout=5))
+    if not all(item.get('success') for item in result):
+        print('Screen rotation failed',file=sys.stderr)
+
+def toggle_keyboard():
+    bus=['gdbus','call','--session','--dest','sm.puri.OSK0','--object-path','/sm/puri/OSK0']
+    state=subprocess.check_output(bus+['--method','org.freedesktop.DBus.Properties.Get',
+                                      'sm.puri.OSK0','Visible'],text=True,timeout=3).strip()
+    # gdbus may vary whitespace/tuple rendering across package versions.
+    # Parse the D-Bus boolean token instead of matching its whole pretty string.
+    match = re.search(r'\b(true|false)\b', state, re.IGNORECASE)
+    if match is None:
+        return
+    visible = match.group(1).lower() == 'true'
+    subprocess.run(bus+['--method','sm.puri.OSK0.SetVisible',
+                        'false' if visible else 'true'],
+                   check=True,stdout=subprocess.DEVNULL,timeout=3)
+
+def charge_limit_label():
+    try:
+        enabled=Path('/sys/class/power_supply/chiron-charger/charge_control_end_threshold').read_text().strip()=='85'
+        return '85% ON' if enabled else '85% OFF'
+    except OSError:return '85% —'
+
+def blocks():
+    global info_tail
+    result = [dict(name=k, full_text=v, min_width=48, align='center') for k,v in
+              [('logout','Exit?' if time.monotonic()<logout_until else 'Logout'),
+               ('terminal','Term'),('keyboard','Keys'),('rotate','Rot'),
+               ('dimmer','B−'),('brighter','B+'),('charge-limit',charge_limit_label()),('close','Close')] if k in actions]
+    if '--info' in sys.argv:
+        result=metric_blocks()[:3]
+        if info_tail[0] is not None and time.monotonic()-info_tail[1]<10:
+            return result+info_tail[0]
+    if '--buttons' not in sys.argv:result.append(dict(full_text=wifi_status()))
+    for p in Path('/sys/class/power_supply').glob('*'):
+        if '--buttons' in sys.argv:break
+        try:
+            if (p/'type').read_text().strip() == 'Battery':
+                percent = int((p/'capacity').read_text())
+                try: status = (p/'status').read_text().strip()
+                except OSError: status = 'Unknown'
+                result.append(dict(full_text=f'Bat {percent}%'+(' +' if status=='Charging' else '')))
+                break
+        except (OSError, ValueError):
+            continue
+    if '--buttons' not in sys.argv:result.append(dict(full_text=time.strftime('%m-%d %H:%M')))
+    if '--info' in sys.argv:info_tail=(result[3:],time.monotonic())
+    # Make the first block occupy the unused bar width, keeping Logout at left.
+    if 'logout' in actions and '--info' not in sys.argv:
+        try:
+            outputs=json.loads(subprocess.check_output(['swaymsg','-r','-t','get_outputs'],text=True,timeout=3))
+            width=next(o['rect']['width'] for o in outputs if o.get('active') and o['name'].startswith('DSI-'))
+            sizes=[max(b.get('min_width',0),text_width(b['full_text'])) for b in result]
+            result[0]['min_width']=sizes[0]+max(0,width-sum(sizes)-9*len(result)-6)
+            result[0]['align']='left'
+        except (OSError,ValueError,StopIteration,subprocess.SubprocessError):pass
+    return result
+
+def text_width(text):
+    # Match Sway's configured Pango font; measure once per distinct label.
+    if text in width_cache:return width_cache[text]
+    p=ctypes.CDLL('libpango-1.0.so.0');c=ctypes.CDLL('libpangocairo-1.0.so.0');g=ctypes.CDLL('libgobject-2.0.so.0')
+    def bind(lib,name,result,*args):
+        f=getattr(lib,name);f.restype=result;f.argtypes=args;return f
+    ptr=ctypes.c_void_p
+    context=bind(p,'pango_font_map_create_context',ptr,ptr)(bind(c,'pango_cairo_font_map_get_default',ptr)())
+    layout=bind(p,'pango_layout_new',ptr,ptr)(context)
+    font=bind(p,'pango_font_description_from_string',ptr,ctypes.c_char_p)(b'DejaVu Sans 12')
+    bind(p,'pango_layout_set_font_description',None,ptr,ptr)(layout,font)
+    bind(p,'pango_layout_set_text',None,ptr,ctypes.c_char_p,ctypes.c_int)(layout,text.encode(),-1)
+    w,h=ctypes.c_int(),ctypes.c_int()
+    bind(p,'pango_layout_get_pixel_size',None,ptr,ptr,ptr)(layout,ctypes.byref(w),ctypes.byref(h))
+    bind(p,'pango_font_description_free',None,ptr)(font)
+    unref=bind(g,'g_object_unref',None,ptr);unref(layout);unref(context)
+    width_cache[text]=w.value
+    return w.value
+width_cache={}
+
+def main():
+    global logout_until
+    libc=ctypes.CDLL(None,use_errno=True)
+    notify=libc.inotify_init1(os.O_NONBLOCK|os.O_CLOEXEC)
+    if notify >= 0 and libc.inotify_add_watch(notify,b'/run/chiron-screen',0x8|0x100|0x80) < 0:
+        os.close(notify)
+        notify=-1
+    print(json.dumps(dict(version=1,click_events=True)), flush=True)
+    print('[', flush=True)
+    first=True
+    while True:
+        if notify >= 0:
+            libc.inotify_add_watch(notify,b'/run/chiron-screen',0x8|0x100|0x80)
+        try:
+            dark=all(int((p/'brightness').read_text())==0 for p in Path('/sys/class/backlight').glob('*'))
+        except (OSError,ValueError):dark=False
+        if first or not dark:
+            print(('' if first else ',')+json.dumps(blocks()),flush=True)
+            first=False
+        # Notification gives immediate button/wake updates; 60s is a fallback
+        # for service restarts or brightness changes outside the controller.
+        timeout=60 if dark else (2 if '--info' in sys.argv else max(1,60-time.time()%60))
+        if logout_until>time.monotonic():timeout=min(timeout,logout_until-time.monotonic())
+        if dark and '--info' in sys.argv:
+            global last_cpu
+            last_cpu=None
+        ready,_,_=select.select([sys.stdin]+([notify] if notify>=0 else []),[],[],timeout)
+        if notify in ready:
+            try:os.read(notify,65536)
+            except BlockingIOError:pass
+        if sys.stdin not in ready:continue
+        line=sys.stdin.readline()
+        if not line:return
+        try: event=json.loads(line.strip().lstrip(','))
+        except ValueError:continue
+        if not isinstance(event,dict):continue
+        name=event.get('name')
+        if name in actions and event.get('button')==1:
+            try:
+                if name=='logout':
+                    if time.monotonic()<logout_until:
+                        subprocess.run(['swaymsg','exit'],stdout=subprocess.DEVNULL,timeout=5)
+                    else:logout_until=time.monotonic()+5
+                    continue
+                logout_until=0
+                if name=='charge-limit':
+                    subprocess.run(['sudo','-n','/usr/local/sbin/chiron-charge-limit','toggle'],check=True,stdout=subprocess.DEVNULL,timeout=5)
+                    continue
+                if name=='keyboard':
+                    toggle_keyboard()
+                    continue
+                if name=='rotate':
+                    toggle_rotation()
+                    continue
+                if name in ('dimmer','brighter'):
+                    args=['chiron-screen',name]
+                else:
+                    args=['swaymsg','kill'] if name=='close' else ['swaymsg','exec',actions[name]]
+                subprocess.run(args,stdout=subprocess.DEVNULL,timeout=12)
+            except (OSError,ValueError,subprocess.SubprocessError):
+                pass
+
+if __name__=='__main__':
+    if '--toggle-keyboard' in sys.argv:toggle_keyboard()
+    elif '--toggle-rotation' in sys.argv:toggle_rotation()
+    else:main()

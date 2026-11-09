@@ -1,0 +1,1 @@
+_greetd ALL=(root) NOPASSWD: /usr/local/sbin/chiron-charge-limit toggle

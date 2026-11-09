@@ -1,0 +1,107 @@
+#!/usr/bin/python3
+"""Blank the display after an idle period; the power button is the only wake source.
+
+The panel and backlight are owned by chiron-power-button, which exposes a Unix
+datagram socket at /run/chiron-screen/control.  This service only ever sends
+"blank" there: it never writes the backlight and never turns the panel back on,
+so a single power-button press stays the one and only way to wake the screen.
+
+Input devices are opened read-only and *without* EVIOCGRAB, so Sway and the
+power-button service keep receiving every event.  Any input resets the idle
+timer.  The PMIC power key is skipped on purpose - chiron-power-button owns it.
+"""
+import os
+import select
+import socket
+import struct
+import time
+from pathlib import Path
+
+EVENT = struct.Struct('@llHHi')
+SKIP_DEVICES = {'pm8941_pwrkey'}
+CONTROL = '/run/chiron-screen/control'
+BACKLIGHT = '/sys/class/backlight/backlight/brightness'
+TIMEOUT = float(os.environ.get('CHIRON_IDLE_TIMEOUT', '300'))
+POLL = 1.0
+
+
+def log(message):
+    print(message, flush=True)
+
+
+def brightness():
+    try:
+        return int(Path(BACKLIGHT).read_text())
+    except OSError:
+        return -1
+
+
+def send(command):
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(2)
+            sock.connect(CONTROL)
+            sock.send(command.encode())
+        return True
+    except OSError as error:
+        log('%s failed: %s' % (command, error))
+        return False
+
+
+def open_devices():
+    opened = {}
+    for node in sorted(Path('/sys/class/input').glob('event*')):
+        try:
+            name = (node / 'device/name').read_text().strip()
+        except OSError:
+            continue
+        if name in SKIP_DEVICES:
+            continue
+        try:
+            fd = os.open('/dev/input/' + node.name, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError as error:
+            log('skip %s (%s): %s' % (node.name, name, error))
+            continue
+        opened[fd] = name
+    return opened
+
+
+def main():
+    devices = open_devices()
+    log('idle blank armed: timeout %.0f s, devices %s'
+        % (TIMEOUT, sorted(devices.values())))
+    last = time.monotonic()
+    lit = brightness() > 0
+    while True:
+        ready, _, _ = select.select(list(devices), [], [], POLL)
+        now = time.monotonic()
+
+        active = False
+        for fd in ready:
+            try:
+                data = os.read(fd, EVENT.size * 64)
+            except OSError as error:
+                log('drop %s: %s' % (devices[fd], error))
+                os.close(fd)
+                devices.pop(fd, None)
+                continue
+            if data:
+                active = True
+
+        if active:
+            last = now
+
+        current = brightness() > 0
+        if current and not lit:
+            # chiron-power-button woke the panel: restart the idle window.
+            last = now
+        elif current and not active and now - last >= TIMEOUT:
+            if send('blank'):
+                log('blank: %.1f s idle' % (now - last))
+                current = False
+            last = now
+        lit = current
+
+
+if __name__ == '__main__':
+    main()

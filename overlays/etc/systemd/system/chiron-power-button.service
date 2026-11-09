@@ -1,0 +1,10 @@
+[Unit]
+Description=Chiron backlight and long-press shutdown
+After=systemd-udev-trigger.service
+[Service]
+RuntimeDirectory=chiron-screen
+ExecStart=/usr/local/sbin/chiron-power-button
+Restart=on-failure
+RestartSec=2
+[Install]
+WantedBy=multi-user.target

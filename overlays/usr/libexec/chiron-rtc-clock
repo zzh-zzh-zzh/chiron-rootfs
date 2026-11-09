@@ -1,0 +1,110 @@
+#!/usr/bin/python3
+"""Restore wall time from a retained PMIC counter without changing that counter."""
+import json
+import math
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+
+STATE = Path('/var/lib/chiron-clock/rtc-offset.json')
+RTC = Path('/sys/class/rtc/rtc0')
+MIN_TIME = 1577836800  # 2020-01-01 UTC
+MAX_TIME = 4102444800  # 2100-01-01 UTC
+MAX_ELAPSED = 10 * 366 * 86400
+
+
+def sample():
+    start = time.time()
+    raw = int((RTC / 'since_epoch').read_text())
+    end = time.time()
+    if not 0 <= end - start < 1:
+        raise ValueError('clock changed or RTC read was too slow')
+    identity = Path('/etc/machine-id').read_text().strip()
+    if len(identity) != 32 or any(c not in '0123456789abcdef' for c in identity):
+        raise ValueError('machine identity is not initialized')
+    return raw, (start + end) / 2, identity, (RTC / 'name').read_text().strip()
+
+
+def restored_time(state, raw, machine, rtc_name):
+    if state.get('version') != 1 or state.get('machine') != machine or state.get('rtc') != rtc_name:
+        raise ValueError('saved clock belongs to a different system or RTC')
+    old_raw, wall = state['raw'], state['wall']
+    if type(old_raw) is not int or type(raw) is not int or not 0 <= old_raw < 2**32:
+        raise ValueError('invalid RTC counter')
+    if type(wall) not in (int, float) or not math.isfinite(wall) or not MIN_TIME <= wall < MAX_TIME:
+        raise ValueError('invalid saved wall time')
+    elapsed = raw - old_raw
+    if not 0 <= elapsed <= MAX_ELAPSED:
+        raise ValueError('RTC reset, wrapped, or saved state is too old')
+    target = wall + elapsed
+    if not MIN_TIME <= target < MAX_TIME:
+        raise ValueError('restored date is out of range')
+    return target
+
+
+def save():
+    result = subprocess.run(['chronyc', '-c', 'tracking'], text=True, capture_output=True,
+                            timeout=2, env={**os.environ, 'LC_ALL': 'C'})
+    fields = result.stdout.strip().split(',')
+    if result.returncode or len(fields) != 14 or fields[13] not in ('Normal', 'Insert second', 'Delete second'):
+        print('RTC offset unchanged: network time is not synchronized')
+        return
+    if not 1 <= int(fields[2]) <= 15:
+        raise ValueError('invalid time source stratum')
+    raw, wall, machine, name = sample()
+    if not MIN_TIME <= wall < MAX_TIME or not 0 <= wall - float(fields[3]) < 86400:
+        raise ValueError('network time reference is stale or invalid')
+    if not math.isfinite(float(fields[4])) or abs(float(fields[4])) > 0.5:
+        raise ValueError('system time has not converged')
+    state = dict(version=1, raw=raw, wall=wall, machine=machine, rtc=name)
+    restored_time(state, raw, machine, name)
+    STATE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=STATE.parent, delete=False) as f:
+            temporary = Path(f.name)
+            json.dump(state, f, sort_keys=True)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, STATE)
+        directory = os.open(STATE.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    print('Saved synchronized wall time and RTC counter')
+
+
+def restore():
+    if not STATE.exists():
+        print('No saved RTC offset; waiting for initial network time')
+        return
+    if STATE.stat().st_size > 4096:
+        raise ValueError('saved state is too large')
+    state = json.loads(STATE.read_text())
+    if not isinstance(state, dict):
+        raise ValueError('invalid saved clock state')
+    raw, current, machine, name = sample()
+    target = restored_time(state, raw, machine, name)
+    if target > current + 2:
+        time.clock_settime(time.CLOCK_REALTIME, target)
+        print('Restored wall time from retained RTC counter')
+    else:
+        print('System time is already at or beyond saved RTC estimate')
+
+
+if __name__ == '__main__':
+    if len(sys.argv) != 2 or sys.argv[1] not in ('save', 'restore'):
+        raise SystemExit('Usage: chiron-rtc-clock save|restore')
+    try:
+        globals()[sys.argv[1]]()
+    except (OSError, ValueError, KeyError, TypeError, OverflowError, subprocess.TimeoutExpired) as e:
+        # Invalid or unavailable state must not prevent boot or overwrite good state.
+        print('RTC wall-time recovery skipped: ' + str(e), file=sys.stderr)

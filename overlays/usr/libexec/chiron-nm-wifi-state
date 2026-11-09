@@ -1,0 +1,25 @@
+#!/bin/sh
+# Keep wlan0 unmanaged until the Qualcomm firmware supervisor declares ready.
+set -u
+state=/run/chiron-wifi/status
+desired=no
+if [ -r "$state" ] && grep -qx 'ready-for-network' "$state"; then
+    desired=yes
+fi
+if [ "$desired" = no ]; then
+    devices=$(timeout -k 1 3 nmcli -t -f DEVICE device status 2>/dev/null || true)
+    printf '%s\n' "$devices" | grep -Fxq wlan0 || exit 0
+    timeout -k 1 3 nmcli device set wlan0 managed no || true
+    exit 0
+fi
+# Firmware is already ready; wait briefly for NetworkManager to republish wlan0.
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    devices=$(timeout -k 1 3 nmcli -t -f DEVICE device status 2>/dev/null || true)
+    if printf '%s\n' "$devices" | grep -Fxq wlan0; then
+        timeout -k 1 3 nmcli device set wlan0 managed yes && exit 0
+    fi
+    sleep 1
+done
+echo 'chiron-nm-wifi-state: wlan0 not available to NetworkManager after restart' >&2
+# Do not make NetworkManager fail to start if its device is temporarily absent.
+exit 0

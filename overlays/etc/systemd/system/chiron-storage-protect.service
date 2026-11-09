@@ -1,0 +1,10 @@
+[Unit]
+Description=Protect original MIX 2 calibration and system partitions
+After=systemd-udev-trigger.service
+Before=chiron-wifi.service
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/chiron-storage-protect
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target

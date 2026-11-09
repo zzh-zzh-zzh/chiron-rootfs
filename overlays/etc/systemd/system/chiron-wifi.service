@@ -1,0 +1,14 @@
+[Unit]
+Description=Prepare MIX 2 WCN3990 and Qualcomm remote services
+Requires=chiron-storage-protect.service
+Wants=NetworkManager.service
+After=chiron-storage-protect.service NetworkManager.service network.target
+[Service]
+Type=simple
+ExecStart=/usr/libexec/chiron-wifi
+ExecStop=/usr/libexec/chiron-wifi-stop $MAINPID
+Restart=no
+TimeoutStopSec=75
+KillMode=mixed
+[Install]
+WantedBy=multi-user.target

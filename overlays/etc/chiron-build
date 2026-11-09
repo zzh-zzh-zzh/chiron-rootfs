@@ -1,0 +1,7 @@
+CHIRON_PROFILE=ubuntu-server-sway
+RELEASE=server-r137-clean1-usb1-20261103
+KERNEL=7.2.10-xiaomi-chiron-server-r137-clean1
+BASE=release-server-audit-20261027
+CLANG=21.1.8
+LTO=ThinLTO
+PREEMPT=PREEMPT_LAZY

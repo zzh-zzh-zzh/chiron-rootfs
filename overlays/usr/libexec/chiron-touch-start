@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+mkdir -p /run/chiron-touch
+exec > /run/chiron-touch/start.log 2>&1
+for i in $(seq 1 20); do
+    if dmesg | grep -Fq 'Chiron JDI 1080x2160 initialization complete'; then
+        modprobe rmi_i2c
+        for j in $(seq 1 5); do
+            for device in /sys/bus/i2c/devices/*-0020; do
+                test -L "$device/driver" || continue
+                if [ "$(basename "$(readlink "$device/driver")")" = rmi4_i2c ]; then
+                    echo ready > /run/chiron-touch/status
+                    exit 0
+                fi
+            done
+            sleep 1
+        done
+        break
+    fi
+    sleep 1
+done
+echo failed > /run/chiron-touch/status
+exit 1

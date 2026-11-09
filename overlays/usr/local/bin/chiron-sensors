@@ -1,0 +1,79 @@
+#!/usr/bin/python3
+"""On-demand hardware readings. No daemon, root access or register writes."""
+import argparse,json,time,sys
+from pathlib import Path
+
+def read(path):
+    try:return Path(path).read_text().strip()
+    except OSError:return None
+def number(path,scale=1):
+    try:return float(read(path))/scale
+    except (TypeError,ValueError):return None
+def collect():
+    result={'time':time.strftime('%Y-%m-%dT%H:%M:%S%z'),'battery':{},'chargers':[],'thermal':[], 'extra_temperatures':[]}
+    for p in Path('/sys/class/power_supply').glob('*'):
+        if read(p/'type') not in ('USB','USB_DCP','USB_CDP','USB_C','Mains'):continue
+        c={'name':p.name,'online':number(p/'online'),'status':read(p/'status'),
+           'usb_type':read(p/'usb_type'),'voltage_V':number(p/'voltage_now',1e6),
+           'current_A':number(p/'current_now',1e6),'current_limit_A':number(p/'current_max',1e6)}
+        v,i=c['voltage_V'],c['current_A']
+        c['input_power_W']=v*i if v is not None and i is not None else None
+        result['chargers'].append(c)
+    for p in Path('/sys/class/power_supply').glob('*'):
+        if read(p/'type')!='Battery':continue
+        b={'name':p.name,'capacity_percent':number(p/'capacity'),'voltage_V':number(p/'voltage_now',1e6),
+           'current_A':number(p/'current_now',1e6),'temperature_C':number(p/'temp',10),
+           'charger_status':read(p/'status'),'health':read(p/'health')}
+        v,i=b['voltage_V'],b['current_A']
+        b['net_power_W']=v*i if v is not None and i is not None else None
+        b['flow']='unknown' if i is None else ('into battery' if i>0 else 'out of battery' if i<0 else 'zero')
+        result['battery']=b
+        break
+    for p in sorted(Path('/sys/class/thermal').glob('thermal_zone*'),key=lambda p:int(p.name[12:])):
+        result['thermal'].append({'name':read(p/'type') or p.name,'temperature_C':number(p/'temp',1000),'source':str(p/'temp')})
+    # Channel identities and conversion are from qcom-spmi-rradc.c.
+    for p in Path('/sys/bus/iio/devices').glob('iio:device*'):
+        if read(p/'name')!='pmi8998-rradc':continue
+        for channel,name in ((1,'PMI8998 skin channel'),(2,'PMI8998 die'),(3,'PMI8998 charger channel')):
+            base=p/f'in_temp{channel}'
+            raw=number(str(base)+'_raw'); offset=number(str(base)+'_offset'); scale=number(str(base)+'_scale')
+            value=(raw+offset)*scale/1000 if all(x is not None for x in (raw,offset,scale)) else None
+            result['extra_temperatures'].append({'name':name,'temperature_C':value,'source':str(base)})
+    return result
+def value(v,unit):return 'unavailable' if v is None else f'{v:.2f} {unit}'
+def display(r):
+    b=r['battery']
+    print('Hardware sensors — '+r['time'])
+    print('Battery: '+value(b.get('capacity_percent'),'%'))
+    for key,label,unit in [('voltage_V','Voltage','V'),('current_A','Current','A'),('temperature_C','Battery temperature','°C'),('net_power_W','Net battery power (calculated)','W')]:
+        print(f'  {label}: {value(b.get(key),unit)}')
+    print('  Current flow: '+b.get('flow','unknown')+'; positive=into battery, negative=out')
+    print('  Charger status: '+(b.get('charger_status') or 'not exposed by driver'))
+    for c in r['chargers']:
+        print(f"Charger {c['name']}: {c['status'] or 'unknown'}; {c['usb_type'] or 'unknown type'}")
+        print('  USB input: '+value(c['voltage_V'],'V')+' / '+value(c['current_A'],'A')+' / '+value(c['input_power_W'],'W'))
+        print('  Input current limit: '+value(c['current_limit_A'],'A'))
+    print('  Health: '+(b.get('health') or 'not exposed by driver'))
+    cpu=[x['temperature_C'] for x in r['thermal'] if x['name'].startswith('cpu') and x['temperature_C'] is not None]
+    print('CPU hottest reported zone: '+value(max(cpu) if cpu else None,'°C'))
+    print('Thermal zones (device-tree labels, not independent component power):')
+    for t in r['thermal']+r['extra_temperatures']:
+        print(f"  {t['name']}: {value(t['temperature_C'],'°C')}")
+    print('GPU/other region temperatures do not imply those devices are powered on.')
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--json',action='store_true')
+    parser.add_argument('--watch',type=float,metavar='SECONDS',help='refresh while this command runs (minimum 2 seconds)')
+    args=parser.parse_args()
+    if args.watch is not None and (not 2<=args.watch<=3600):parser.error('--watch must be 2..3600 seconds')
+    try:
+        while True:
+            r=collect()
+            if args.json:print(json.dumps(r,ensure_ascii=False),flush=True)
+            else:
+                if args.watch and sys.stdout.isatty():print('\033[H\033[2J',end='')
+                display(r)
+            if not args.watch:break
+            time.sleep(args.watch)
+    except KeyboardInterrupt:pass
+if __name__=='__main__':main()

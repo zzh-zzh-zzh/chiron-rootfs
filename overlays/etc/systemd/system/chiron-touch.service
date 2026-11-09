@@ -1,0 +1,11 @@
+[Unit]
+Description=Initialize MIX 2 touch after panel initialization
+After=systemd-udev-trigger.service
+Before=display-manager.service
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/chiron-touch-start
+RemainAfterExit=yes
+TimeoutStartSec=30
+[Install]
+WantedBy=multi-user.target

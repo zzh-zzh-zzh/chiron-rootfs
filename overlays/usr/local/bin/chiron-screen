@@ -1,0 +1,13 @@
+#!/usr/bin/python3
+"""Send a fixed backlight action to the privileged service."""
+import socket
+import sys
+import uuid
+if len(sys.argv)!=2 or sys.argv[1] not in ('blank','wake','dimmer','brighter'):
+    raise SystemExit('Usage: chiron-screen blank|wake|dimmer|brighter')
+with socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM) as s:
+    s.bind('\0chiron-screen-'+uuid.uuid4().hex)
+    s.settimeout(10)
+    s.sendto(sys.argv[1].encode(),'/run/chiron-screen/control')
+    if s.recv(16)!=b'ok':
+        raise SystemExit('Backlight service did not acknowledge the action')

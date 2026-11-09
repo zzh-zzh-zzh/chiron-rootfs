@@ -1,0 +1,15 @@
+[Unit]
+Description=Chiron 2 GiB ZSTD compressed RAM swap
+Before=multi-user.target
+ConditionPathExists=/sys/block/zram0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/chiron-zram start
+ExecStop=/usr/local/sbin/chiron-zram stop
+TimeoutStartSec=30
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

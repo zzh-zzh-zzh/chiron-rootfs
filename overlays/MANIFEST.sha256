@@ -1,0 +1,59 @@
+# chiron 定制层清单 — 从设备反向提取（2026-11-07），rootfs/overlays/ 下的相对路径
+# 来源：/etc/chiron, /etc/systemd/{system,logind.conf.d,journald.conf.d}, /usr/libexec,
+#       /usr/local/{bin,sbin,libexec}, /usr/lib/systemd/system, /etc/{netplan,NetworkManager,ssh,sudoers.d,sysctl.d,needrestart,udev/rules.d,initramfs-tools}
+# 注意：/lib/systemd/system/chiron-rtc-*.service 与 /usr/lib/systemd/system/ 下同名文件
+#       在 usrmerge 下是同一份，已按 usr/ 路径归档，lib/ 别名未重复存放。
+
+cae6a3985d73b6b72950f163e05e9abf14f476229ead997a7e315d98069dbbeb  MANIFEST.sha256
+140766741f126ca745cd43bd4d559b0d6f72dc57acd816bde11753109d957c27  etc/NetworkManager/conf.d/10-chiron-device.conf
+a97f41a1e2997c53405930a6387dc6f664320c3fc71aa7612527a1fccbf9f6cd  etc/chiron-build
+eea8254c7500ba3de996aa8ad6af399183f04e17d4a8102fde539dbc93a90012  etc/chiron/charge-limit
+b3bd63061da31a2791bb68f591ae25ec53a6cbd2f61937007888f2cc64426c96  etc/chiron/greeter-terminal.css
+320ee62512431b6f4a14fd5045ad6ac2a8e82583304fcbfe192144b09a9fb3ae  etc/chiron/greeter.conf
+d12f861a76caa555c550d28c763d0528967ee02340863d28cc2d7c6422e91ad1  etc/chiron/keyboard-ui/gtk-3.0/gtk.css
+05031bb08da556fd279e8e08a3740405e4517e2a17969267c72833ae1b965439  etc/chiron/keyboards/terminal/us.yaml
+1e564b4e67d451283c7ebe38c82cab391570ae9a37d0715b7f751419179f4b87  etc/chiron/keyboards/terminal/us_wide.yaml
+af39f74fc7337334f60172941b6be62c4e8926752684b48ae6935fb44b9353ce  etc/chiron/sway.conf
+f47ecab426a0ade94a79b2e65b720a57f322e5bc6ddaaee30165ba5ed710d6fa  etc/initramfs-tools/conf.d/chiron
+0ca26dc4b4c257b1849a7d13f126e64d3907409bb62d788f9ea4ce0411e89505  etc/needrestart/conf.d/50-chiron-wifi.conf
+8420a0dd56160c635a419a1be1a0835e450484fa6cbcaebddd127a51fab36787  etc/needrestart/conf.d/51-chiron-session.conf
+d0fa4fd1b88a52f9b8eae641c7c84b7843197155c08df46c0057a4ea23094411  etc/netplan/01-chiron.yaml
+c6f304501dd051cc53700f7047111f474231dbb6070a1c049f629644753a7230  etc/ssh/sshd_config.d/10-chiron.conf
+1ea50e6c45a21ec8807cbd38f2e3a44b3a199e409d6610c50c82f0f69bdf0f02  etc/sudoers.d/chiron-charge-limit
+df4febe09ee247a5bc800edd2a551ab9f338655385c0aace5ba1b7b6a1a7871a  etc/sysctl.d/90-chiron-zram.conf
+3a6486385c0e52e425c4931fd525d0cc0a570983c700f115a337953d75b45c96  etc/systemd/journald.conf.d/10-chiron.conf
+b49bb099ea35e95389c3fecb33dec69f2f807cec5dbf6409d039bbec78039aa7  etc/systemd/logind.conf.d/10-chiron-power.conf
+0eed8d461ed09c11282c6218fb54d2a487e7e1e7a2ae74ba6be07417939b5976  etc/systemd/system/NetworkManager.service.d/10-chiron-wifi-state.conf
+cc02db210c95c0a1b805f93f98709dd03bd77a9cbe03a4225cd27dc6d7e70d1b  etc/systemd/system/chiron-charge-limit.service
+799b9c529b4f8196fecfdfe2369085261f5beeead332af58ac2a9e35a8541742  etc/systemd/system/chiron-idle-blank.service
+c4b942a2bbb83a1ddbda5c9d03581c99278cc8f126b93406f49e07a498a20d53  etc/systemd/system/chiron-power-button.service
+1ba04ae4ea11c06f70f02b8dfc80a1866492a2cb6a8f6c9ebb624f3710984b34  etc/systemd/system/chiron-ssh-hostkeys.service
+58f44620aecdfd3a3c537c3e754649e8d66165fec950aedb65ae9801275ca0b4  etc/systemd/system/chiron-storage-protect.service
+29bc3f6489c2e4c6e0e8cc3bb7cc0845301d4a2fa132ed2532da9606855bec20  etc/systemd/system/chiron-touch.service
+ca1e4c95419839a1a755bc0ed76937ecf73cde5df4b953391482d1c2099a688b  etc/systemd/system/chiron-usb.service
+c87a3d180cc3f1f507371b57834f8d98a875ffe5113a60a4c9c09079c6572013  etc/systemd/system/chiron-wifi.service
+9597834ff89f644cd90c48724575b6e3baf69b76ee0851b58cd12d9b3249f284  etc/systemd/system/chiron-zram.service
+479bc3e3f0182643dd8b8c869c6e3243044308dad1b93c2aa174348469dd3d96  etc/systemd/system/greetd.service.d/chiron.conf
+0ec57f27f21b1df2fdb786cf342ccc99bfd02fd2857309bcb893c18d5ec691cb  etc/systemd/system/ssh.service.d/10-chiron-hostkeys.conf
+b6825f30a157d60c3e092d67d3e05c811aee7782a2dda256b6bb3a9786172cc7  etc/udev/rules.d/80-chiron-backlight.rules
+43c2172fb9f343b8eb6a290c277b3af99bc22398630ce79583866fd78fac13aa  etc/udev/rules.d/99-chiron-hide-internal-partitions.rules
+b8dd8cc3b078cefad0fa373ac45cf48fcb92fdb21a233b8c1b0635bb922ffb44  usr/libexec/chiron-nm-wifi-state
+bb626144959baedaf01af2ac6040656b34920f5183131a04e352b26c093cd177  usr/libexec/chiron-rtc-clock
+16407a195691bddc8fb76a431038bae11d6cfc455cec86a6821f9c6d9837dae9  usr/libexec/chiron-storage-protect
+ea15f89adf1b60a6c898144bc0860f8f4bf641cd6ee106255d341eb317ee5c9c  usr/libexec/chiron-touch-start
+8029c81eec98243083a02c3acdfc6cd78dec4a98c247dd0f4e8af4aae1e42683  usr/libexec/chiron-usb
+2360319e89556c1c97f892d5e6d7ac9384016fefabc06237dc62f5fb483d07e4  usr/libexec/chiron-wifi
+692e622da8ac7f2d2b30abddec6e1cded18bd70f7fc24ddaae5ea199691b4e1d  usr/libexec/chiron-wifi-monitor
+698478bf01600f4d5eb3e11e8b5485ce587f8ef361df2cba4ef45ca5a33f4e71  usr/libexec/chiron-wifi-stop
+72f414bbfa6ad4ebd2b71a232b672c3c0c6b0c2fba64b1a3a520b99f1eb8165d  usr/libexec/chiron-wlan-address
+6c1966e193f109d8566f0716a30943f3c28961c7957e4bdf33cee7bcc61b40fd  usr/local/bin/chiron-greeter
+c8e4bb95fdda637c99e2f18b758ca7cbb9028d67d8525c445f08ea3683a0093d  usr/local/bin/chiron-screen
+f58923d4a129dd1a89928153ff2bb9e62f31f4724491ebeaa1a8a8eda8df7189  usr/local/bin/chiron-sensors
+50c4d7a83cad17f8b41e621a33a5f5d232429d9add1bcfb5ac8d173942ef288e  usr/local/bin/chiron-wayland
+f916f078e1542755ab7ce687f5581ba619ee70cacc6684e43bf23da14bad9c2a  usr/local/libexec/chiron-controls-bar
+244b5125cc7f7265a78514c905ca7a0b38a9dd794361d3ef35bc712a7b9d2369  usr/local/libexec/chiron-gtkgreet
+13a3c74dfc50f202b2f4992e20e78693b01b06e6c8baa2f31f4361a47b8e69c7  usr/local/libexec/chiron-idle-blank
+94fb0972fb8924fbad677f6e635615f4959e18e78a0a44f6f167f42b97b0efd4  usr/local/libexec/chiron-wayland-status
+a4fe873dc0fdedbd7d8a63a06706f2bedcb275cadefb187af8c29c3751f6ad77  usr/local/sbin/chiron-charge-limit
+ef0e13fc0801d4ba65e5da220136dc6b10dd47024bf84b2651e97f187e1b1813  usr/local/sbin/chiron-power-button
+506679234417671a637b123a0958bff27d72c0535a1192898601cd47f6164f80  usr/local/sbin/chiron-zram

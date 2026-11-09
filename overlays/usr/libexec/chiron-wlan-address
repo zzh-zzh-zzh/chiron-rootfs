@@ -1,0 +1,18 @@
+#!/bin/sh
+# Read each phone's original WLAN address without mounting persist or writing it.
+set -eu
+umask 077
+persist=$(readlink -f /dev/disk/by-partlabel/persist)
+node=${persist##*/}
+grep -qx PARTNAME=persist "/sys/class/block/$node/uevent"
+test "$(blockdev --getro "$persist")" = 1
+work=$(mktemp -d /run/chiron-wlan.XXXXXX)
+trap 'rm -f "$work/mac"; rmdir "$work"' EXIT
+debugfs -R "dump /wlan_bt/wlan.mac $work/mac" "$persist" >/dev/null 2>&1
+test "$(stat -c %s "$work/mac")" = 6
+set -- $(od -An -tx1 -v "$work/mac")
+test "$#" = 6
+test "$((0x$1 & 1))" = 0
+address=$(printf '%s:%s:%s:%s:%s:%s' "$1" "$2" "$3" "$4" "$5" "$6")
+case "$address" in 00:00:00:00:00:00|ff:ff:ff:ff:ff:ff) exit 1;; esac
+printf '%s\n' "$address"

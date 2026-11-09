@@ -1,0 +1,11 @@
+[Unit]
+Description=MIX 2 USB serial with automatic OTG role switching
+After=systemd-udev-trigger.service
+Before=NetworkManager.service ssh.service
+[Service]
+Type=simple
+ExecStart=/usr/libexec/chiron-usb
+Restart=on-failure
+RestartSec=2
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,38 @@
+#!/bin/bash
+set -euo pipefail
+exec 9>/run/lock/chiron-zram.lock
+flock -x 9
+case "${1:?}" in
+start)
+    test -e /dev/zram0
+    size=$(cat /sys/block/zram0/disksize)
+    if awk '$1 == "/dev/zram0" { found=1 } END { exit !found }' /proc/swaps; then
+        test "$size" = 2147483648
+        grep -Fq '[zstd]' /sys/block/zram0/comp_algorithm
+        exit 0
+    fi
+    if [ "$size" = 0 ]; then
+        # zramctl --algorithm also resets the device, which can fail with
+        # EBUSY while boot-time udev probing holds it open. A fresh device
+        # needs configuration only, using the kernel's sysfs interface.
+        printf 'zstd\n' > /sys/block/zram0/comp_algorithm
+        printf '2147483648\n' > /sys/block/zram0/disksize
+    else
+        test "$size" = 2147483648
+        grep -Fq '[zstd]' /sys/block/zram0/comp_algorithm
+    fi
+    mkswap /dev/zram0
+    swapon --priority 100 /dev/zram0
+    ;;
+stop)
+    if grep -q '^/dev/zram0 ' /proc/swaps; then
+        swapoff /dev/zram0
+    fi
+    # Keep the device node: util-linux can hot-remove it during --reset,
+    # which makes the unit's next ConditionPathExists check skip startup.
+    if [ -e /sys/block/zram0/reset ]; then
+        printf '1\n' > /sys/block/zram0/reset
+    fi
+    ;;
+*) exit 2;;
+esac

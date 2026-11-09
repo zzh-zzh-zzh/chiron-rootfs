@@ -1,0 +1,21 @@
+#!/bin/sh
+# Runs before the supervisor's MSS shutdown, while NetworkManager is still up.
+set -eu
+pid=${1:-}
+case "$pid" in ''|*[!0-9]*) exit 0;; esac
+if [ -d /run/chiron-wifi ]; then
+    printf '%s\n' stopping > /run/chiron-wifi/status
+fi
+if [ -d /sys/class/net/wlan0 ]; then
+    timeout -k 2 12 nmcli device disconnect wlan0 || true
+    timeout -k 2 10 nmcli device set wlan0 managed no || true
+    timeout -k 2 10 ip link set wlan0 down || true
+fi
+# The supervisor's TERM handler stops MSS before rmtfs/tqftpserv/diag-router.
+kill -TERM "$pid" 2>/dev/null || exit 0
+for i in $(seq 1 30); do
+    kill -0 "$pid" 2>/dev/null || exit 0
+    sleep 1
+done
+echo 'Wi-Fi supervisor did not finish ordered shutdown in 30 seconds' >&2
+exit 1

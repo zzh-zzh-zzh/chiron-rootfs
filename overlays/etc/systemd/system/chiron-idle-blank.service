@@ -1,0 +1,16 @@
+[Unit]
+Description=Chiron idle screen blank (5 min)
+Documentation=file:///usr/local/libexec/chiron-idle-blank
+After=chiron-power-button.service
+Wants=chiron-power-button.service
+
+[Service]
+Type=simple
+Environment=CHIRON_IDLE_TIMEOUT=300
+ExecStart=/usr/local/libexec/chiron-idle-blank
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

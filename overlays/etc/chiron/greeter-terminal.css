@@ -1,0 +1,40 @@
+/* Terminal appearance; authentication and keyboard remain stock gtkgreet. */
+window {
+    background-image: none;
+    background-color: #0d1319;
+    color: #d6e2ea;
+    font-family: "DejaVu Sans Mono";
+    font-size: 16px;
+}
+box#body {
+    background-color: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+}
+label { color: #b8d4c3; }
+entry, combobox button {
+    background-image: none;
+    background-color: #0d1319;
+    color: #e2eee7;
+    border: 1px solid #435766;
+    border-radius: 0;
+    box-shadow: none;
+    min-height: 40px;
+    padding: 4px 10px;
+    caret-color: #8bdbad;
+}
+entry:focus { border-color: #8bdbad; }
+button {
+    background-image: none;
+    background-color: #20372c;
+    color: #d6f3e0;
+    border: 1px solid #54866b;
+    border-radius: 0;
+    box-shadow: none;
+    min-height: 40px;
+    padding: 4px 12px;
+}
+button:hover, button:focus { background-color: #2c4a3b; }
+button:active { background-color: #395f4c; }
+button:disabled { color: #85908a; background-color: #1b2822; }

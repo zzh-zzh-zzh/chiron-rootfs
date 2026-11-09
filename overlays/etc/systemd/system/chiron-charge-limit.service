@@ -1,0 +1,16 @@
+[Unit]
+Description=Restore persistent Chiron charging limit
+After=systemd-udev-trigger.service
+Before=greetd.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/chiron-charge-limit apply
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=10s
+TimeoutStartSec=70s
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch chiron backlight state file
+Documentation=file:///usr/libexec/chiron-brightness-persist
+
+[Path]
+PathModified=/run/chiron-screen/state
+Unit=chiron-brightness-save.service
+
+[Install]
+WantedBy=multi-user.target
